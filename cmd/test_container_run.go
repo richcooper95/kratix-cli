@@ -23,19 +23,26 @@ var testContainerRunCmd = &cobra.Command{
 	Args: cobra.ExactArgs(1),
 }
 
-var testcaseNames, command string
+var testcaseNames, command, kindCluster string
 
 func init() {
 	testContainerCmd.AddCommand(testContainerRunCmd)
 	testContainerRunCmd.Flags().StringVarP(&testcaseNames, "testcases", "t", "", "Comma-separated list of testcases to run")
 	testContainerRunCmd.Flags().StringVarP(&command, "command", "c", "", "Command to start the image with")
+	testContainerRunCmd.Flags().StringVarP(&kindCluster, "kind-cluster", "k", "", "Name of the KinD cluster to use")
 }
 
 func TestContainerRun(cmd *cobra.Command, args []string) error {
-	if testcaseNames == "" {
-		fmt.Println("Running all testcases...")
-	} else {
-		fmt.Printf("Running testcases: %s\n", testcaseNames)
+	if _, err := exec.LookPath("docker"); err != nil {
+		return fmt.Errorf("docker not found in PATH")
+	}
+
+	if _, err := exec.LookPath("kind"); err != nil {
+		return fmt.Errorf("kind not found in PATH")
+	}
+
+	if err := kindCheckCluster(kindCluster); err != nil {
+		return err
 	}
 
 	pipelineInput := args[0]
@@ -54,23 +61,71 @@ func TestContainerRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	imageName, err := buildImage(containerArgs)
+	imageName, err := buildAndLoadImage(containerArgs, kindCluster)
 	if err != nil {
 		return err
 	}
 
+	if testcaseNames == "" {
+		fmt.Println("\n\033[35mRunning all container testcases...\033[0m")
+	} else {
+		fmt.Printf("\n\033[35mRunning testcases:\033[0m %s\n", testcaseNames)
+	}
+
+	optionalNewline := ""
+	if verbose {
+		optionalNewline = "\n"
+	}
+
 	for _, testcaseDir := range testcaseDirs {
-		fmt.Printf("Running testcase: %s...\n", path.Base(testcaseDir))
+		fmt.Printf("\033[35mRunning testcase:\033[0m %s...%s", path.Base(testcaseDir), optionalNewline)
 
 		err = runTestcase(testcaseDir, imageName)
 		if err != nil {
-			return err
+			fmt.Printf("\033[31m❌\n  Testcase failed: %s\033[0m\n", err)
+			continue
 		}
 
-		fmt.Println("Testcase passed ✅")
+		optionalTestcasePassed := ""
+		if verbose {
+			optionalTestcasePassed = "Testcase passed "
+		}
+
+		fmt.Printf("\033[32m%s✅\033[0m\n", optionalTestcasePassed)
 	}
 
 	return nil
+}
+
+func kindLoadImage(image, clusterName string) error {
+	printfVerbose("Loading image %q into KinD cluster %q...", image, clusterName)
+	cmd := exec.Command("kind", "load", "docker-image", image, "--name", clusterName)
+	if verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	return cmd.Run()
+}
+
+func kindCheckCluster(clusterName string) error {
+	if clusterName == "" {
+		return nil
+	}
+
+	cmd := exec.Command("kind", "get", "clusters")
+	output, err := cmd.Output()
+	if err != nil {
+		return err
+	}
+
+	clusters := strings.Split(string(output), "\n")
+	for _, cluster := range clusters {
+		if cluster == clusterName {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("kind cluster %q does not exist", clusterName)
 }
 
 func getTestcaseDirs(imageDir, testcaseNames string) ([]string, error) {
@@ -110,29 +165,6 @@ func getDirs(dir string) ([]string, error) {
 }
 
 func runTestcase(testcaseDir, image string) error {
-	// Placeholder for running the testcases
-	// This function should be replaced with the actual test runner
-
-	/*
-		Something like:
-
-		docker run \
-		--rm \
-		--volume ~/.kube:/root/.kube \
-		--network=host \
-		--volume ./test/output:/kratix/output \
-		--volume ./test/input:/kratix/input \
-		--volume ./test/metadata:/kratix/metadata \
-		kratix-workshop/app-promise-pipeline:v0.1.0
-
-		See: https://docs.kratix.io/workshop/part-ii/promise-workflows#test-driving-your-workflows
-	*/
-
-	// Steps:
-	// 1. Copy the before/ files to a temporary directory
-	// 2. Run the container image, mounting the temporary directory
-	// 3. Check the temporary directory contents against the after/ files (expected output)
-
 	// Copy the before/ files to a temporary directory
 	beforeDir := path.Join(testcaseDir, "before")
 	// get a tempdir in /tmp
@@ -142,7 +174,7 @@ func runTestcase(testcaseDir, image string) error {
 		return err
 	}
 
-	fmt.Printf("Copying before/ files to temporary directory %s...\n", tmpdir)
+	printfVerbose("Copying before/ files to temporary directory %s...\n", tmpdir)
 
 	// copy the before/ files to the tempdir
 	err = copyDir(beforeDir, tmpdir)
@@ -150,22 +182,109 @@ func runTestcase(testcaseDir, image string) error {
 		return err
 	}
 
+	homedir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	volumes := []string{
+		path.Join(tmpdir, "output") + ":/kratix/output",
+		path.Join(tmpdir, "input") + ":/kratix/input",
+		path.Join(tmpdir, "metadata") + ":/kratix/metadata",
+	}
+	if kindCluster != "" {
+		volumes = append(volumes, path.Join(homedir, ".kube", "config")+":/root/.kube/config")
+	}
+
+	cmdArgs := []string{
+		"run",
+		"--rm",
+		"--network=host",
+	}
+	for _, volume := range volumes {
+		cmdArgs = append(cmdArgs, "--volume", volume)
+	}
+	cmdArgs = append(cmdArgs, image)
+
 	// Run the container image, mounting the temporary directory
 	// TODO: Extract into a function
-	cmd := fmt.Sprintf(
-		"docker run --rm --volume ~/.kube:/root/.kube --network=host --volume %s:/kratix/output --volume %s:/kratix/input --volume %s:/kratix/metadata %s",
-		path.Join(tmpdir, "output"), path.Join(tmpdir, "input"), path.Join(tmpdir, "metadata"),
-		image,
-	)
-	runner := exec.Command(cmd)
+	runner := exec.Command("docker", cmdArgs...)
 
-	// TODO: Maybe don't show this by default? --verbose flag?
-	runner.Stdout = os.Stdout
-	runner.Stderr = os.Stderr
+	if verbose {
+		runner.Stdout = os.Stdout
+		runner.Stderr = os.Stderr
+	}
 	err = runner.Run()
 	if err != nil {
 		return err
 	}
+
+	afterDir := path.Join(testcaseDir, "after")
+	printfVerbose("Checking output against after/ files...\n")
+
+	for _, dir := range []string{"metadata", "output"} {
+		err = compareDirs(path.Join(tmpdir, dir), path.Join(afterDir, dir))
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func compareDirs(dir1, dir2 string) error {
+	entries1, err := os.ReadDir(dir1)
+	if err != nil {
+		return err
+	}
+
+	entries2, err := os.ReadDir(dir2)
+	if err != nil {
+		return err
+	}
+
+	if len(entries1) != len(entries2) {
+		return fmt.Errorf("directories %s and %s have different number of files", dir1, dir2)
+	}
+
+	for i, entry1 := range entries1 {
+		entry2 := entries2[i]
+
+		if entry1.Name() != entry2.Name() {
+			return fmt.Errorf("files %s and %s are not the same", entry1.Name(), entry2.Name())
+		}
+
+		if entry1.IsDir() {
+			err = compareDirs(path.Join(dir1, entry1.Name()), path.Join(dir2, entry2.Name()))
+			if err != nil {
+				return err
+			}
+		} else {
+			err = compareFiles(path.Join(dir1, entry1.Name()), path.Join(dir2, entry2.Name()))
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func compareFiles(file1, file2 string) error {
+	contents1, err := os.ReadFile(file1)
+	if err != nil {
+		return err
+	}
+
+	contents2, err := os.ReadFile(file2)
+	if err != nil {
+		return err
+	}
+
+	if string(contents1) != string(contents2) {
+		return fmt.Errorf("files %s and %s do not have the same contents", file1, file2)
+	}
+
 	return nil
 }
 
@@ -199,24 +318,30 @@ func copyDir(src, dst string) error {
 	return nil
 }
 
-func buildImage(containerArgs *ContainerCmdArgs) (string, error) {
+func buildAndLoadImage(containerArgs *ContainerCmdArgs, clusterName string) (string, error) {
 	imageName := fmt.Sprintf("%s-%s-%s-%s:dev", containerArgs.Lifecycle, containerArgs.Action, containerArgs.Pipeline, containerArgs.Container)
 
 	pipelineDir := path.Join("workflows", containerArgs.Lifecycle, containerArgs.Action, containerArgs.Pipeline)
 
-	fmt.Println("Building test image...")
+	printfVerbose("Building test image...")
 	if err := forkBuilderCommand(buildContainerOpts, imageName, pipelineDir, containerArgs.Container); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
-	// TODO: Remove hard-coded "platform" and move to a CLI arg (?) or config
-	return imageName, kindLoadImage(imageName, "platform")
+	if clusterName != "" {
+		printfVerbose("Loading image into KinD cluster...")
+		if err := kindLoadImage(imageName, clusterName); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return "", err
+		}
+	}
+
+	return imageName, nil
 }
 
-func kindLoadImage(image, clusterName string) error {
-	cmd := exec.Command("kind", "load", "docker-image", image, "--name", clusterName)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+func printfVerbose(formatStr string, a ...any) {
+	if verbose {
+		fmt.Printf(formatStr, a...)
+	}
 }

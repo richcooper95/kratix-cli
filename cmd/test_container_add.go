@@ -27,7 +27,7 @@ var (
 func init() {
 	testContainerCmd.AddCommand(testContainerAddCmd)
 
-	testContainerAddCmd.Flags().StringVarP(&inputObject, "input-object", "o", "", "The path to the input object to use for this testcase")
+	testContainerAddCmd.Flags().StringVarP(&inputObject, "input-object", "o", "", "The path to the input object to use for this testcase (default: example-resource.yaml (resource workflow) or promise.yaml (promise workflow)")
 	testContainerAddCmd.Flags().StringVarP(&testcaseName, "testcase", "t", "", "The name of the testcase to add")
 
 	testContainerAddCmd.MarkFlagRequired("testcase")

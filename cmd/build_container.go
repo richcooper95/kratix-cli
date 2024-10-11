@@ -273,8 +273,10 @@ func forkBuilderCommand(opts *BuildContainerOptions, containerImage, pipelineDir
 	buildArgs = append(strings.Fields(buildCommand), buildArgs...)
 
 	builder := exec.Command(opts.Engine, buildArgs...)
-	builder.Stdout = os.Stdout
-	builder.Stderr = os.Stderr
+	if verbose {
+		builder.Stdout = os.Stdout
+		builder.Stderr = os.Stderr
+	}
 	if err := builder.Run(); err != nil {
 		return err
 	}
@@ -283,8 +285,10 @@ func forkBuilderCommand(opts *BuildContainerOptions, containerImage, pipelineDir
 
 func forkPushCommand(engine, containerImage string) error {
 	builder := exec.Command(engine, "push", containerImage)
-	builder.Stdout = os.Stdout
-	builder.Stderr = os.Stderr
+	if verbose {
+		builder.Stdout = os.Stdout
+		builder.Stderr = os.Stderr
+	}
 	if err := builder.Run(); err != nil {
 		return err
 	}

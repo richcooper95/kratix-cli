@@ -26,6 +26,8 @@ var rootCmd = &cobra.Command{
 `,
 }
 
+var verbose bool
+
 func Execute(version string) {
 	rootCmd.Version = version
 	err := rootCmd.Execute()
@@ -36,6 +38,7 @@ func Execute(version string) {
 
 func init() {
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
 }
 
 func templateFiles(templates embed.FS, outputDir string, filesToTemplate map[string]string, templateValues interface{}) error {
